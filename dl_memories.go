@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 )
 
 type DLObject struct {
@@ -23,27 +24,120 @@ type Media struct {
 	SavedMedia []DLObject `json:"Saved Media"`
 }
 
+const (
+	workers  = 1
+	baseDir  = "."
+	videoDir = "videos"
+	imageDir = "images"
+	timeZone = "Europe/Vienna"
+)
+
 var logger log.Logger
 
-func getMeta(id int, meta *DLObject) (string, string, string, error) {
-	var baseDir string
-	var extenstion string
-	var name string
+func init() {
+	os.Setenv("TZ", timeZone)
+	logfile, e := os.OpenFile("dl_log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if e != nil {
+		fmt.Fprintf(os.Stderr, "[ERRO] could not setup logger.\n\nError: %+v\n", e)
+		os.Exit(-1)
+	}
+	logger.SetOutput(logfile)
 
-	name = strings.Split(meta.Date, " ")[0] + " " + strings.Split(meta.Date, " ")[1]
+	imgFolder := fmt.Sprintf("%s/%s", baseDir, imageDir)
+	vidFolder := fmt.Sprintf("%s/%s", baseDir, videoDir)
+	if _, err := os.Stat(imgFolder); os.IsNotExist(err) {
+		err := os.Mkdir(imgFolder, 0755)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERRO] could not create folder: %s.\n\nError: %+v\n", imgFolder, e)
+			os.Exit(2)
+		}
+	}
+
+	if _, err := os.Stat(vidFolder); os.IsNotExist(err) {
+		err := os.Mkdir(vidFolder, 0755)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[ERRO] could not create folder: %s.\n\nError: %+v\n", vidFolder, e)
+			os.Exit(2)
+		}
+	}
+}
+
+func main() {
+	var jsonFilePath = "json/memories_history.json"
+	jsonFile, e := os.Open(jsonFilePath)
+	if e != nil {
+		fmt.Fprintf(os.Stderr, "[ERRO] could not read data from file: %s\n\nError: %+v\n", jsonFilePath, e)
+		os.Exit(1)
+	}
+	defer jsonFile.Close()
+
+	var media Media
+	byteValue, _ := ioutil.ReadAll(jsonFile)
+	json.Unmarshal(byteValue, &media)
+
+	c := make(chan DLObject)
+	iC := make(chan int)
+	wg := new(sync.WaitGroup)
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go worker(c, iC, wg)
+	}
+
+	fmt.Fprintf(os.Stdout, "[INFO] data read... starting to download %d elements\n", len(media.SavedMedia))
+	for id, obj := range media.SavedMedia {
+		c <- obj
+		iC <- id
+	}
+
+	close(c)
+	wg.Wait()
+}
+
+// The worker(s) invoke the save function with the given parameter
+func worker(wChan chan DLObject, idChan chan int, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for obj := range wChan {
+		e := save(<-idChan, &obj)
+		if e != nil {
+			fmt.Println(e)
+		}
+	}
+}
+
+func makeFilepath(id int, meta *DLObject) (string, error) {
+	var folder string
+	var extenstion string
+	var filename string
+	var dir string
+
+	filename = strings.Split(meta.Date, " ")[0] + " " + strings.Split(meta.Date, " ")[1]
 	if meta.Media == "Image" {
-		baseDir = "images/"
-		extenstion = ".jpg"
+		folder = imageDir
+		extenstion = "jpg"
 	} else if meta.Media == "Video" {
-		baseDir = "videos/"
-		extenstion = ".mp4"
+		folder = videoDir
+		extenstion = "mp4"
 	} else {
 		e := fmt.Errorf("[WARN] %d - media type unknown, skipping\n", id)
 		logger.Println(e)
-		return baseDir, extenstion, name, e
+		return dir, e
 	}
+	dir = fmt.Sprintf("%s/%s/%s.%s", baseDir, folder, filename, extenstion)
+	return dir, nil
+}
 
-	return baseDir, extenstion, name, nil
+func changeFileTime(id int, path, t string) error {
+	layout := "2006-01-02 15:04:05"
+	t = fmt.Sprintf("%s %s", strings.Split(t, " ")[0], strings.Split(t, " ")[1])
+	modTime, err := time.Parse(layout, t)
+	if err != nil {
+		e := fmt.Errorf("[WARN] %d - could not parse time\n", id)
+		logger.Println(fmt.Sprintf("[WARN] %d - %+v", id, e))
+		return e
+	}
+	return os.Chtimes(path, time.Now().Local(), modTime)
 }
 
 func save(id int, obj *DLObject) error {
@@ -87,12 +181,11 @@ func save(id int, obj *DLObject) error {
 	}
 	fmt.Fprintf(os.Stdout, "[INFO] %d - download finished\n", id)
 
-	baseDir, extension, name, e := getMeta(id, obj)
+	dir, e := makeFilepath(id, obj)
 	if e != nil {
 		return e
 	}
 
-	var dir = fmt.Sprintf("%s%d - %s.%s", baseDir, id, name, extension)
 	file, e := os.Create(dir)
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - could not create file: %s\n", id, dir)
@@ -109,60 +202,13 @@ func save(id int, obj *DLObject) error {
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
 		return err
 	}
+
+	e = changeFileTime(id, dir, obj.Date)
+	if e != nil {
+		fmt.Fprintf(os.Stdout, "[WARN] %d - could not set modified/access time\n", id)
+		logger.Println(fmt.Sprintf("[WARN] %d - %+v", id, e))
+	}
+
 	fmt.Fprintf(os.Stdout, "[INFO] %d - %s successfully saved: %s\n", id, obj.Media, dir)
 	return nil
-}
-
-func worker(wChan chan DLObject, idChan chan int, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for obj := range wChan {
-		e := save(<-idChan, &obj)
-		if e != nil {
-			fmt.Println(e)
-		}
-	}
-}
-
-func init() {
-	logfile, e := os.OpenFile("dl_log.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
-	if e != nil {
-		fmt.Fprintf(os.Stderr, "[ERRO] could not setup logger.\n\nError: %+v\n", e)
-		os.Exit(-1)
-	}
-	logger.SetOutput(logfile)
-}
-
-func main() {
-	const workers = 100
-	var jsonFilePath = "json/memories_history.json"
-	jsonFile, e := os.Open(jsonFilePath)
-	if e != nil {
-		fmt.Fprintf(os.Stderr, "[ERRO] could not read data from file: %s\n\nError: %+v\n", jsonFilePath, e)
-		os.Exit(1)
-	}
-	defer jsonFile.Close()
-
-	var media Media
-	byteValue, _ := ioutil.ReadAll(jsonFile)
-	json.Unmarshal(byteValue, &media)
-
-	c := make(chan DLObject)
-	iC := make(chan int)
-	wg := new(sync.WaitGroup)
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go worker(c, iC, wg)
-	}
-
-	fmt.Fprintf(os.Stdout, "[INFO] data read... starting to download %d elements\n", len(media.SavedMedia))
-	for id, obj := range media.SavedMedia {
-		c <- obj
-		iC <- id
-	}
-
-	close(c)
-	wg.Wait()
-
 }

@@ -25,7 +25,7 @@ type Media struct {
 }
 
 const (
-	workers  = 1
+	workers  = 100
 	baseDir  = "."
 	videoDir = "videos"
 	imageDir = "images"
@@ -84,7 +84,7 @@ func main() {
 		go worker(c, iC, wg)
 	}
 
-	fmt.Fprintf(os.Stdout, "[INFO] data read... starting to download %d elements\n", len(media.SavedMedia))
+	fmt.Printf("Data successfully read from: %s ... starting to download %d elements\n\n", jsonFilePath, len(media.SavedMedia))
 	for id, obj := range media.SavedMedia {
 		c <- obj
 		iC <- id
@@ -92,6 +92,8 @@ func main() {
 
 	close(c)
 	wg.Wait()
+
+	fmt.Fprintf(os.Stdout, "\nDone\n")
 }
 
 // The worker(s) invoke the save function with the given parameter
@@ -99,20 +101,25 @@ func worker(wChan chan DLObject, idChan chan int, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	for obj := range wChan {
-		e := save(<-idChan, &obj)
+		id := <-idChan
+		e := save(id, &obj)
 		if e != nil {
-			fmt.Println(e)
+			fmt.Print(e)
 		}
 	}
 }
 
-func makeFilepath(id int, meta *DLObject) (string, error) {
+func makeFilepath(id, try int, meta *DLObject) (string, error) {
 	var folder string
 	var extenstion string
 	var filename string
 	var dir string
 
-	filename = strings.Split(meta.Date, " ")[0] + " " + strings.Split(meta.Date, " ")[1]
+	if try == 0 {
+		filename = fmt.Sprintf("%s %s", strings.Split(meta.Date, " ")[0], strings.Split(meta.Date, " ")[1])
+	} else {
+		filename = fmt.Sprintf("%s %s - %d", strings.Split(meta.Date, " ")[0], strings.Split(meta.Date, " ")[1], try)
+	}
 	if meta.Media == "Image" {
 		folder = imageDir
 		extenstion = "jpg"
@@ -121,7 +128,7 @@ func makeFilepath(id int, meta *DLObject) (string, error) {
 		extenstion = "mp4"
 	} else {
 		e := fmt.Errorf("[WARN] %d - media type unknown, skipping\n", id)
-		logger.Println(e)
+		logger.Print(e)
 		return dir, e
 	}
 	dir = fmt.Sprintf("%s/%s/%s.%s", baseDir, folder, filename, extenstion)
@@ -134,25 +141,26 @@ func changeFileTime(id int, path, t string) error {
 	modTime, err := time.Parse(layout, t)
 	if err != nil {
 		e := fmt.Errorf("[WARN] %d - could not parse time\n", id)
-		logger.Println(fmt.Sprintf("[WARN] %d - %+v", id, e))
+		logger.Print(e)
 		return e
 	}
 	return os.Chtimes(path, time.Now().Local(), modTime)
 }
 
 func save(id int, obj *DLObject) error {
-	fmt.Fprintf(os.Stdout, "[INFO] %d - starting download\n", id)
-	response, e := http.Post(obj.Link, "application/x-www-form-urlencoded", nil)
+	logger.Printf("[INFO] %d - starting download - date: %s - media: %s\n", id, obj.Date, obj.Media)
+	fmt.Printf("[INFO] %d - starting download - date: %s - media: %s\n", id, obj.Date, obj.Media)
+	res, e := http.Post(obj.Link, "application/x-www-form-urlencoded", nil)
 	if e != nil {
-		err := fmt.Errorf("[ERRO] %d - response error occured for element\n", id)
-		fmt.Fprintf(os.Stderr, "[ERRO] %d - response error occured for element\n", id)
+		err := fmt.Errorf("[ERRO] %d - SNAPCHAT - response error occured for element\n", id)
+		logger.Print(err)
 		return err
 	}
-	defer response.Body.Close()
+	defer res.Body.Close()
 
-	if response.StatusCode != 200 {
-		e := fmt.Errorf("[ERRO] %d - response status code is not correct for element\n", id)
-		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
+	if res.StatusCode != 200 {
+		e := fmt.Errorf("[ERRO] %d - SNAPCHAT - response status code is not correct for element, response: %d\n", id, res.StatusCode)
+		logger.Print(e)
 		return e
 	}
 
@@ -164,51 +172,65 @@ func save(id int, obj *DLObject) error {
 	 * From the 'new' url we now can download the actual media.
 	 */
 	buf := new(bytes.Buffer)
-	buf.ReadFrom(response.Body)
+	buf.ReadFrom(res.Body)
 	url := buf.String()
-	res, e := http.Get(url)
+	res, e = http.Get(url)
 	if e != nil {
-		err := fmt.Errorf("[ERRO] %d - response error occured for element\n", id)
-		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
+		err := fmt.Errorf("[ERRO] %d - AWS - response error occured for element\n", id)
+		logger.Print(err)
+		logger.Print(e)
 		return err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		e := fmt.Errorf("[ERRO] %d - response status code is not correct for element\n", id)
-		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
+		e := fmt.Errorf("[ERRO] %d - AWS - response status code is not correct for element, response: %d\n", id, res.StatusCode)
+		logger.Print(e)
 		return e
 	}
-	fmt.Fprintf(os.Stdout, "[INFO] %d - download finished\n", id)
 
-	dir, e := makeFilepath(id, obj)
+	dir, e := makeFilepath(id, 0, obj)
 	if e != nil {
 		return e
 	}
 
+	// make sure the filename does not already exist
+	for i := 1; i <= 100; i++ {
+		if _, err := os.Stat(dir); err == nil {
+			logger.Printf("[WARN] %d - filename exists, generating new name - try: %d", id, i)
+			dir, e = makeFilepath(id, i, obj)
+			if e != nil {
+				return e
+			}
+		} else {
+			i = 101
+		}
+	}
+
+	// create the file and write data to it
 	file, e := os.Create(dir)
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - could not create file: %s\n", id, dir)
-		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
+		logger.Print(e)
 		return err
 	}
 	defer file.Close()
-	fmt.Fprintf(os.Stdout, "[INFO] %d - file created: %s\n", id, dir)
 
-	fmt.Fprintf(os.Stdout, "[INFO] %d - writing %s data to: %s\n", id, obj.Media, dir)
 	_, e = io.Copy(file, res.Body)
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - could not write to file: %s\n", id, dir)
-		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
+		logger.Print(err)
+		logger.Print(fmt.Sprintf("[ERRO] %d - %+v", id, e))
 		return err
 	}
 
+	// change the modified/access time
 	e = changeFileTime(id, dir, obj.Date)
 	if e != nil {
-		fmt.Fprintf(os.Stdout, "[WARN] %d - could not set modified/access time\n", id)
-		logger.Println(fmt.Sprintf("[WARN] %d - %+v", id, e))
+		logger.Print(fmt.Sprintf("[WARN] %d - %+v", id, e))
 	}
 
-	fmt.Fprintf(os.Stdout, "[INFO] %d - %s successfully saved: %s\n", id, obj.Media, dir)
+	logger.Printf("[INFO] %d - %s successfully saved: %s\n", id, obj.Media, dir)
+	fmt.Printf("[INFO] %d - %s successfully saved: %s\n", id, obj.Media, dir)
 	return nil
 }

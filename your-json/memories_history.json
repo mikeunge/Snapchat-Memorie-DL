@@ -1,0 +1,13 @@
+{
+    "Saved Media": [
+        {
+            "Date": "date_of_creation",
+            "Media": "Image",
+            "Download Link": "link/to/snapchat/server.com"
+        },{
+            "Date": "date_of_creation",
+            "Media": "Video",
+            "Download Link": "link/to/snapchat/server.com"
+        }
+    ]
+}

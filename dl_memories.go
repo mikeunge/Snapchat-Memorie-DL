@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -24,10 +25,12 @@ type Media struct {
 
 var logger log.Logger
 
-func getMeta(id int, meta *DLObject) (string, string, error) {
+func getMeta(id int, meta *DLObject) (string, string, string, error) {
 	var baseDir string
 	var extenstion string
+	var name string
 
+	name = strings.Split(meta.Date, " ")[0] + " " + strings.Split(meta.Date, " ")[1]
 	if meta.Media == "Image" {
 		baseDir = "images/"
 		extenstion = ".jpg"
@@ -37,10 +40,10 @@ func getMeta(id int, meta *DLObject) (string, string, error) {
 	} else {
 		e := fmt.Errorf("[WARN] %d - media type unknown, skipping\n", id)
 		logger.Println(e)
-		return "", "", e
+		return baseDir, extenstion, name, e
 	}
 
-	return baseDir, extenstion, nil
+	return baseDir, extenstion, name, nil
 }
 
 func save(id int, obj *DLObject) error {
@@ -49,7 +52,6 @@ func save(id int, obj *DLObject) error {
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - response error occured for element\n", id)
 		fmt.Fprintf(os.Stderr, "[ERRO] %d - response error occured for element\n", id)
-		// logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
 		return err
 	}
 	defer response.Body.Close()
@@ -57,10 +59,16 @@ func save(id int, obj *DLObject) error {
 	if response.StatusCode != 200 {
 		e := fmt.Errorf("[ERRO] %d - response status code is not correct for element\n", id)
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
-		// fmt.Fprintf(os.Stderr, "%+v", e)
 		return e
 	}
 
+	/**
+	 * Snapchat is a bit weird, they hide the actual image link behind their own url.
+	 * All the memories are stored on aws buckets, the aws url gets returned from the first url (POST) request.
+	 *
+	 * We get the first response, create a new byte buffer, feed it the recieved data from the body and construct our actual url.
+	 * From the 'new' url we now can download the actual media.
+	 */
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(response.Body)
 	url := buf.String()
@@ -68,7 +76,6 @@ func save(id int, obj *DLObject) error {
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - response error occured for element\n", id)
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
-		// fmt.Fprintf(os.Stderr, "%+v", err)
 		return err
 	}
 	defer res.Body.Close()
@@ -76,22 +83,20 @@ func save(id int, obj *DLObject) error {
 	if res.StatusCode != 200 {
 		e := fmt.Errorf("[ERRO] %d - response status code is not correct for element\n", id)
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
-		// fmt.Fprintf(os.Stderr, "%+v", e)
 		return e
 	}
 	fmt.Fprintf(os.Stdout, "[INFO] %d - download finished\n", id)
 
-	baseDir, extension, e := getMeta(id, obj)
+	baseDir, extension, name, e := getMeta(id, obj)
 	if e != nil {
 		return e
 	}
 
-	var dir = fmt.Sprintf("%s%s - %d.%s", baseDir, obj.Date, id, extension)
+	var dir = fmt.Sprintf("%s%d - %s.%s", baseDir, id, name, extension)
 	file, e := os.Create(dir)
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - could not create file: %s\n", id, dir)
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
-		// fmt.Fprint(os.Stderr, "%+v", err)
 		return err
 	}
 	defer file.Close()
@@ -102,7 +107,6 @@ func save(id int, obj *DLObject) error {
 	if e != nil {
 		err := fmt.Errorf("[ERRO] %d - could not write to file: %s\n", id, dir)
 		logger.Println(fmt.Sprintf("[ERRO] %d - %+v", id, e))
-		// fmt.Fprint(os.Stderr, "%+v", err)
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "[INFO] %d - %s successfully saved: %s\n", id, obj.Media, dir)

@@ -1,0 +1,9 @@
+{
+  "Workers": 100,
+  "Tries": 10,
+  "Root": "./",
+  "VideoPath": "videos",
+  "ImagePath": "images",
+  "TimeZone": "Europe/Vienna",
+  "LogFile": "snapchat_dl.log"
+}

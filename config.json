@@ -5,5 +5,5 @@
   "VideoPath": "videos",
   "ImagePath": "images",
   "TimeZone": "Europe/Vienna",
-  "LogFile": "snapchat_dl.log"
+  "LogFile": "download.log"
 }

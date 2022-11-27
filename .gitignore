@@ -2,6 +2,4 @@
 /images
 /json
 /videos
-/test
-index.html
-dl_log.txt
+download.log
